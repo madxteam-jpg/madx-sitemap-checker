@@ -1,26 +1,23 @@
-import csv
 import gzip
 import io
 import re
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
+import matplotlib.pyplot as plt
 import requests
 import streamlit as st
 
 st.set_page_config(page_title="Auto-Sitemap URL Checker", layout="wide")
 st.title("🔎 Auto-Discover Sitemap & URL Checker")
-st.write("Enter a target webpage URL, and the app will automatically find its domain's sitemap and check if the page is listed.")
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Streamlit Sitemap Checker'}
 
 def discover_sitemap_urls(target_url):
-    """Find sitemap location(s) via robots.txt or standard paths."""
     parsed = urlparse(target_url)
     domain_base = f"{parsed.scheme}://{parsed.netloc}"
     discovered_sitemaps = []
 
-    # 1. Try reading robots.txt for Sitemap directives
     robots_url = f"{domain_base}/robots.txt"
     try:
         res = requests.get(robots_url, headers=HEADERS, timeout=10)
@@ -30,7 +27,6 @@ def discover_sitemap_urls(target_url):
     except Exception:
         pass
 
-    # 2. Fallback: check standard sitemap paths if robots.txt has none
     if not discovered_sitemaps:
         fallback_paths = ["/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml"]
         for path in fallback_paths:
@@ -46,7 +42,6 @@ def discover_sitemap_urls(target_url):
     return list(set(discovered_sitemaps))
 
 def fetch_sitemap_content(sitemap_url):
-    """Fetch content and handle gzipped sitemaps."""
     try:
         response = requests.get(sitemap_url, headers=HEADERS, timeout=15)
         response.raise_for_status()
@@ -57,7 +52,6 @@ def fetch_sitemap_content(sitemap_url):
         return None
 
 def parse_single_sitemap(sitemap_url):
-    """Parse one XML sitemap for links and sub-sitemaps."""
     content = fetch_sitemap_content(sitemap_url)
     if not content:
         return set(), set()
@@ -79,7 +73,6 @@ def parse_single_sitemap(sitemap_url):
     return found_pages, found_sub_sitemaps
 
 def extract_all_urls_parallel(root_sitemap_urls, max_workers=10):
-    """Recursively process all child sitemaps in parallel."""
     all_pages = set()
     visited_sitemaps = set()
     sitemaps_to_crawl = set(root_sitemap_urls)
@@ -103,21 +96,58 @@ def extract_all_urls_parallel(root_sitemap_urls, max_workers=10):
 
     return all_pages
 
-# User Input Form
+def generate_result_card(target_url, is_present, sitemap_sources, total_scanned):
+    """Generates a styled result card PNG using Matplotlib in memory."""
+    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=200)
+    
+    # Hide standard plot axes
+    ax.axis('off')
+    
+    # Card Background & Colors
+    card_color = "#E8F5E9" if is_present else "#FFEBEE"
+    status_text = "PRESENT IN SITEMAP" if is_present else "NOT PRESENT IN SITEMAP"
+    status_color = "#2E7D32" if is_present else "#C62828"
+    
+    # Draw background box
+    fig.patch.set_facecolor("#F8F9FA")
+    ax.add_patch(plt.Rectangle((0.05, 0.05), 0.9, 0.9, color=card_color, ec="#B0BEC5", lw=1.5, transform=ax.transAxes, zorder=1))
+
+    # Text Content
+    ax.text(0.10, 0.80, "SITEMAP VERIFICATION REPORT", fontsize=10, fontweight='bold', color="#546E7A", transform=ax.transAxes)
+    ax.text(0.10, 0.68, status_text, fontsize=16, fontweight='bold', color=status_color, transform=ax.transAxes)
+    
+    # Details
+    truncated_target = target_url if len(target_url) <= 55 else target_url[:52] + "..."
+    ax.text(0.10, 0.52, f"Target URL:\n{truncated_target}", fontsize=9, color="#263238", transform=ax.transAxes)
+    
+    sources_str = ", ".join(sitemap_sources)
+    truncated_sources = sources_str if len(sources_str) <= 55 else sources_str[:52] + "..."
+    ax.text(0.10, 0.35, f"Discovered Sitemap(s):\n{truncated_sources}", fontsize=8, color="#37474F", transform=ax.transAxes)
+    
+    ax.text(0.10, 0.18, f"Total Sitemap URLs Scanned: {total_scanned:,}", fontsize=9, fontweight='bold', color="#37474F", transform=ax.transAxes)
+
+    # Save to BytesIO buffer
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+# User UI
 target_input = st.text_input("Target URL to check", placeholder="https://example.com/blog/my-post")
 
 if st.button("Auto-Discover Sitemap & Check") and target_input:
     clean_target = target_input.strip()
 
-    with st.spinner("Finding sitemap location(s) from target domain..."):
+    with st.spinner("Finding sitemap location(s)..."):
         sitemap_sources = discover_sitemap_urls(clean_target)
 
     if not sitemap_sources:
-        st.error("Could not auto-discover a sitemap via robots.txt or standard paths for this domain.")
+        st.error("Could not auto-discover a sitemap via robots.txt or standard paths.")
     else:
         st.info(f"Discovered Sitemap Source(s): `{', '.join(sitemap_sources)}`")
 
-        with st.spinner("Crawling sitemap index and sub-sitemaps in parallel..."):
+        with st.spinner("Crawling sitemap index in parallel..."):
             all_sitemap_urls = extract_all_urls_parallel(sitemap_sources)
 
         normalized_target = clean_target.rstrip('/')
@@ -129,4 +159,15 @@ if st.button("Auto-Discover Sitemap & Check") and target_input:
         else:
             st.error(f"**STATUS: Not Present**\n\nThe URL `{clean_target}` was NOT found in the sitemap.")
 
-        st.caption(f"Scanned {len(all_sitemap_urls)} total URLs across all discovered sitemaps.")
+        # Generate image snapshot in memory
+        img_buffer = generate_result_card(clean_target, is_present, sitemap_sources, len(all_sitemap_urls))
+
+        # Preview & Download
+        st.image(img_buffer, caption="Generated Report Image Preview", width=550)
+        
+        st.download_button(
+            label="📸 Download Result Image (.png)",
+            data=img_buffer,
+            file_name="sitemap_check_result.png",
+            mime="image/png"
+        )
